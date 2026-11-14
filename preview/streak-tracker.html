@@ -2109,12 +2109,11 @@ function drawByYear(c, x, y, w, h, hits) {
   const ys = stats.years, base = baseColor(cfg);
   if (!ys.length) return emptyMsg(c, x, y, w, h, 'No years to show');
   const maxV = Math.max(1, ...ys.map(o => o.max));
-  const padL = 54, padR = 84, padT = 34, padB = 30, x0 = x + padL, x1 = x + w - padR, y0 = y + h - padB, y1 = y + padT;
-  const step = niceStep(maxV * 1.08, Math.max(3, (y0 - y1) / 55)), top = Math.ceil(maxV * 1.06 / step) * step;
+  const padL = 58, padR = 84, padT = 34, padB = 30, x0 = x + padL, x1 = x + w - padR, y0 = y + h - padB, y1 = y + padT;
+  const ax = lengthAxis(maxV * 1.06, (y0 - y1) / 55, cfg), top = ax.top;
   const Y = v => y0 - v / top * (y0 - y1), slot = (x1 - x0) / ys.length, X = i => x0 + (i + .5) * slot;
   c.font = `13px ${F.mono}`; c.textAlign = 'right'; c.textBaseline = 'middle';
-  for (let v = 0; v <= top + 1e-9; v += step) { const py = Math.round(Y(v)) + .5; c.strokeStyle = C.grid; c.beginPath(); c.moveTo(x0, py); c.lineTo(x1, py); c.stroke(); c.fillStyle = C.muted; c.fillText(cfg.agg === 'hourly' && v >= 48 && step >= 24 ? `${v / 24}d` : String(v), x0 - 8, py); }
-  c.save(); c.translate(x + 12, (y0 + y1) / 2); c.rotate(-Math.PI / 2); c.textAlign = 'center'; c.fillStyle = C.muted; c.font = `12px ${F.mono}`; c.fillText(unitsTitle(cfg), 0, 0); c.restore();
+  for (const v of ax.ticks) { const py = Math.round(Y(v)) + .5; c.strokeStyle = C.grid; c.beginPath(); c.moveTo(x0, py); c.lineTo(x1, py); c.stroke(); c.fillStyle = C.muted; c.fillText(ax.label(v), x0 - 8, py); }
   const bw = Math.max(1.5, Math.min(22, slot * 0.74));
   ys.forEach((o, i) => {
     const col = o.sy === stats.currentSY ? COLORS.current : (stats.record && o.max === stats.record) ? COLORS.record : base;
@@ -2145,6 +2144,15 @@ function drawByYear(c, x, y, w, h, hits) {
   c.strokeStyle = 'rgba(232,228,217,.3)'; c.beginPath(); c.moveTo(x0, y0 + .5); c.lineTo(x1, y0 + .5); c.stroke();
 }
 
+// Length axis: hours shown as days once streaks run past a few days.
+function lengthAxis(maxV, nTicks, cfg) {
+  const asDays = cfg.agg === 'hourly' && maxV > 96;
+  const unit = asDays ? 24 : 1, step = Math.max(1, Math.round(niceStep(maxV / unit, Math.max(3, nTicks)))) * unit;
+  const top = Math.ceil(maxV / step) * step, ticks = [];
+  for (let v = 0; v <= top + 1e-9; v += step) ticks.push(v);
+  const suffix = cfg.agg === 'daily' ? ' d' : asDays ? ' d' : ' h';
+  return { top, ticks, label: v => v === 0 ? '0' : `${Math.round(v / unit)}${suffix}` };
+}
 function drawAll(c, x, y, w, h, hits) {
   const { cfg, S, streaks, stats } = last, base = baseColor(cfg);
   const { s, l } = streaks, K = l.length;
@@ -2156,8 +2164,10 @@ function drawAll(c, x, y, w, h, hits) {
   const top = useLog ? Math.log10(maxL * 1.3) : Math.ceil(maxL * 1.08), Y = L => useLog ? y0 - Math.log10(Math.max(1, L)) / top * (y0 - y1) : y0 - L / top * (y0 - y1);
   c.font = `13px ${F.mono}`; c.textAlign = 'right'; c.textBaseline = 'middle';
   const ticks = useLog ? [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000].filter(v => v <= maxL * 1.3) : (() => { const st = niceStep(top, 5), a = []; for (let v = 0; v <= top; v += st) a.push(v); return a; })();
-  for (const v of ticks) { const py = Math.round(Y(v)) + .5; c.strokeStyle = C.grid; c.lineWidth = 1; c.beginPath(); c.moveTo(x0, py); c.lineTo(x1, py); c.stroke(); c.fillStyle = C.muted; c.fillText(String(v), x0 - 8, py); }
-  c.save(); c.translate(x + 12, (y0 + y1) / 2); c.rotate(-Math.PI / 2); c.textAlign = 'center'; c.fillStyle = C.muted; c.font = `12px ${F.mono}`; c.fillText(`Length (${cfg.agg === 'daily' ? 'days' : 'hours'})${useLog ? ', log scale' : ''}`, 0, 0); c.restore();
+  const lab = v => cfg.agg === 'hourly' && v >= 48 && v % 24 === 0 ? `${v / 24} d` : `${v}${cfg.agg === 'daily' ? ' d' : ' h'}`;
+  const tks = useLog && cfg.agg === 'hourly' ? [1, 3, 6, 12, 24, 48, 96, 168, 336, 720, 1440].filter(v => v <= maxL * 1.3) : ticks;
+  for (const v of tks) { const py = Math.round(Y(v)) + .5; c.strokeStyle = C.grid; c.lineWidth = 1; c.beginPath(); c.moveTo(x0, py); c.lineTo(x1, py); c.stroke(); c.fillStyle = C.muted; c.fillText(lab(v), x0 - 8, py); }
+  if (useLog) { c.font = `12px ${F.mono}`; c.fillStyle = C.muted; c.textAlign = 'left'; c.textBaseline = 'alphabetic'; c.fillText('length, log scale', x0, y1 - 10); }
   c.textAlign = 'center'; c.textBaseline = 'alphabetic';
   for (const tk of timeTicks(t0, t1, x1 - x0)) { const px = Math.round(X(tk.t)) + .5; c.strokeStyle = C.grid; c.beginPath(); c.moveTo(px, y1); c.lineTo(px, y0); c.stroke(); c.fillStyle = C.muted; c.fillText(tk.label, px, y0 + 20); }
   const r = K > 3000 ? 1.8 : K > 800 ? 2.4 : 3.2;
