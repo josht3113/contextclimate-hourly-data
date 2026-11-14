@@ -168,6 +168,14 @@ def mode_of_hist(h):
 
 
 # ── Hourly selection (port of the Streak Tracker's parseChunk, all groups at once) ──
+CLAMPED = {}
+def _cl(v, name):
+    if v is None or -32767 <= v <= 32767:
+        return v
+    CLAMPED[name] = CLAMPED.get(name, 0) + 1
+    return 32767 if v > 0 else -32767
+
+
 def parse_station(lines, idx, iana, y1, y2):
     """lines: CSV rows (already split) for ONE station, time order. idx: column index map.
     Returns {Y: None | {var: list[int]}} for LST years y1..y2 (None = no obs at all)."""
@@ -188,7 +196,7 @@ def parse_station(lines, idx, iana, y1, y2):
         g = lambda f: p[idx[f]] if idx.get(f, -1) >= 0 and idx[f] < len(p) else ''
         for f in ('tmpf', 'dwpf', 'feel', 'vsby'):
             v = num_or_none(g(f))
-            r[f] = None if v is None else js_round(v * 100)
+            r[f] = None if v is None else _cl(js_round(v * 100), f)
         sk = None
         for c in sky_cols:
             code = (p[c] if c < len(p) else '').strip()
@@ -199,23 +207,23 @@ def parse_station(lines, idx, iana, y1, y2):
                 sk = o
         r['sky'] = sk
         k = num_or_none(g('sknt'))
-        r['wind'] = None if k is None else js_round(k * KT_TO_MPH)
+        r['wind'] = None if k is None else _cl(js_round(k * KT_TO_MPH), 'wind')
         gu = num_or_none(g('gust'))
         r['seen'] = r['wind'] is not None or gu is not None
-        r['gust'] = None if gu is None else js_round(gu * KT_TO_MPH)
+        r['gust'] = None if gu is None else _cl(js_round(gu * KT_TO_MPH), 'gust')
         pk = num_or_none(g('peak_wind_gust'))
         if pk is not None:
             pt = to_lst(g('peak_wind_time').strip(), iana) if 'peak_wind_time' in idx else None
             if not (pt is not None and pt <= lst and lst - pt <= 2 * HOUR):
                 pt = lst - 30 * 60000
-            r['pk'] = js_round(pk * KT_TO_MPH); r['pk_lst'] = pt
+            r['pk'] = _cl(js_round(pk * KT_TO_MPH), 'gust'); r['pk_lst'] = pt
         r['bits'] = wx_bits(','.join(p[im:]))
         s = g('p01i').strip()
         if s == 'T':
             r['p'] = TRACE_CODE
         else:
             v = num_or_none(s)
-            r['p'] = None if v is None else js_round(v * 100)
+            r['p'] = None if v is None else _cl(js_round(v * 100), 'p01i')
         if r['p'] is not None:
             pcp_seen.add(year_of_ms((lst // HOUR) * HOUR))
         rows.append(r)
@@ -398,6 +406,15 @@ class Transient(Exception):
     pass
 
 
+class Throttled(Exception):
+    def __init__(self, retry_after):
+        super().__init__('HTTP 429'); self.retry_after = retry_after
+
+
+THROTTLE_MAX = 12
+STATS = {'requests': 0, 'throttled': 0, 'bytes': 0}
+
+
 def iem_url(base, ids, sts, ets):
     q = '&'.join('station=' + s for s in ids) + '&' + '&'.join('data=' + f for f in FIELDS)
     return (f'{base}?{q}&sts={sts}&ets={ets}&tz=Etc%2FUTC&format=comma&latlon=no&elev=no'
@@ -414,7 +431,10 @@ def http_get(url):
                 body = gzip.decompress(body)
             return body.decode('utf-8', 'replace')
     except urllib.error.HTTPError as e:
-        if e.code in (408, 425, 429) or 500 <= e.code < 600:
+        if e.code == 429:
+            ra = e.headers.get('Retry-After') if e.headers else None
+            raise Throttled(float(ra) if ra and ra.strip().isdigit() else 0)
+        if e.code in (408, 425) or 500 <= e.code < 600:
             raise Transient(f'HTTP {e.code}')
         raise
     except (urllib.error.URLError, http.client.HTTPException, socket.timeout, TimeoutError, ConnectionError, OSError) as e:
@@ -423,14 +443,25 @@ def http_get(url):
 
 _last_request = [0.0]
 def fetch_text(base, ids, sts, ets):
-    """One request with retries; on repeated transient failure, split the station list."""
-    for k in range(len(RETRY_WAITS) + 1):
+    """One request with retries; on repeated transient failure, split the station list.
+    429 (rate limit) is waited out and never causes a split."""
+    k = throttles = 0
+    while True:
         wait = REQUEST_GAP_S - (time.time() - _last_request[0])
         if wait > 0:
             time.sleep(wait)
         _last_request[0] = time.time()
+        STATS['requests'] += 1
         try:
-            return http_get(iem_url(base, ids, sts, ets))
+            body = http_get(iem_url(base, ids, sts, ets))
+            STATS['bytes'] += len(body)
+            return body
+        except Throttled as e:
+            throttles += 1; STATS['throttled'] += 1
+            if throttles > THROTTLE_MAX:
+                raise SystemExit(f'IEM kept rate-limiting ({",".join(ids)} {sts}); stopping')
+            time.sleep(max(e.retry_after, min(120, 15 * 2 ** min(throttles - 1, 3))))
+            continue
         except Transient as e:
             if k == len(RETRY_WAITS):
                 if len(ids) > 1:
@@ -443,6 +474,7 @@ def fetch_text(base, ids, sts, ets):
                 raise SystemExit(f'IEM request failed permanently ({",".join(ids)} {sts}..{ets}): {e}')
             log(f'  transient ({e}); retry in {RETRY_WAITS[k]} s')
             time.sleep(RETRY_WAITS[k])
+            k += 1
 
 
 def split_csv(text, wanted):
@@ -610,14 +642,20 @@ def main():
                 if a.max_minutes and time.time() - t0 > a.max_minutes * 60:
                     log(f'time limit reached; stopping cleanly with {written} files written. Re-run to resume.')
                     sys.exit(3)
+                td = time.time()
                 res = build_decade(a.iem, grp, D, through)
-                for s in grp:
-                    written += write_decade(a.out, s['id'], D, res.get(s['id']))
+                nw = sum(write_decade(a.out, s['id'], D, res.get(s['id'])) for s in grp)
+                written += nw
+                if nw:
+                    log(f'  {D}s {grp[0]["id"]}..{grp[-1]["id"]}: {nw} files, {time.time() - td:.0f} s'
+                        f' | total {STATS["requests"]} req, {STATS["bytes"] / 1e6:.0f} MB, {STATS["throttled"]} rate-limited')
                 if a.done_file:
                     with open(a.done_file, 'a') as f:
                         f.writelines(f'{s["id"]} {D}\n' for s in grp)
             log(f'  {",".join(s["id"] for s in grp0)} done ({written} files, {time.time() - t0:.0f} s)')
-    log(f'finished: {written} files in {time.time() - t0:.0f} s')
+    log(f'finished: {written} files in {time.time() - t0:.0f} s; {STATS}')
+    if CLAMPED:
+        log(f'values clamped to the int16 range (absurd source values): {CLAMPED}')
 
 
 if __name__ == '__main__':
