@@ -1,0 +1,120 @@
+name: Build hourly archive
+
+# Full build: run manually with mode = full (several hours, split across 6 jobs).
+# If a job stops at its time limit, use "Re-run failed jobs": it resumes where it left off.
+# Every January the incremental run adds the year that just ended.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'full = everything, incremental = latest decade (+ new roster stations), stations = listed stations'
+        type: choice
+        options: [incremental, full, stations]
+        default: incremental
+      stations:
+        description: 'For mode = stations: comma-separated ICAO ids, e.g. KISP,KJFK'
+        required: false
+        default: ''
+  schedule:
+    - cron: '17 10 6 1 *'          # Jan 6, 10:17 UTC
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: hourly-archive
+  cancel-in-progress: false
+
+env:
+  MODE: ${{ github.event.inputs.mode || 'incremental' }}
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      through: ${{ steps.t.outputs.through }}
+    steps:
+      - id: t
+        run: echo "through=$(( $(date -u +%Y) - 1 ))" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /scripts/
+            /site/index.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Restore partial progress (re-runs)
+        uses: actions/cache/restore@v4
+        with:
+          path: work
+          key: hourly-${{ github.run_id }}-${{ matrix.shard }}-${{ github.run_attempt }}
+          restore-keys: hourly-${{ github.run_id }}-${{ matrix.shard }}-
+      - name: Build shard
+        run: |
+          mkdir -p work/out
+          if [ -f site/index.json ]; then cp site/index.json work/out/index.json; fi
+          python scripts/build_hourly.py --mode "$MODE" --stations "${{ github.event.inputs.stations }}" \
+            --shard ${{ matrix.shard }}/6 --through ${{ needs.setup.outputs.through }} \
+            --out work/out --done-file work/done.txt --max-minutes 320
+          rm -f work/out/index.json
+      - name: Save partial progress
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: work
+          key: hourly-${{ github.run_id }}-${{ matrix.shard }}-${{ github.run_attempt }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: work/out
+          if-no-files-found: ignore
+          retention-days: 3
+
+  publish:
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shard-*
+          path: site
+          merge-multiple: true
+      - name: Rebuild index
+        run: python scripts/build_hourly.py --mode index --out site --through ${{ needs.setup.outputs.through }}
+      - name: Commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add site
+          if git diff --cached --quiet; then echo "No changes"; exit 0; fi
+          git commit -q -m "Hourly archive: $MODE through ${{ needs.setup.outputs.through }}"
+          git push
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
