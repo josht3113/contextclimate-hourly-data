@@ -101,10 +101,10 @@
 .hl-note strong { color: var(--color-text-primary); }
 .fc-line { font-family: var(--font-body); font-size: 14.5px; line-height: 1.45; color: var(--color-text-secondary); margin-top: 6px; min-height: 0; }
 .fc-line strong { color: var(--tool-accent); }
-.chips { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin: 12px 0 10px; }
+.chips { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 6px; margin: 12px 0 10px; }
 .chip { background: var(--color-surface-2); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 6px 8px; min-width: 0; }
-.chip-l { font-family: var(--font-mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--color-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.chip-v { font-family: var(--font-display); font-weight: 700; font-size: 21px; line-height: 1.2; color: var(--color-text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chip-l { font-family: var(--font-mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--color-text-muted); white-space: nowrap; }
+.chip-v { font-family: var(--font-display); font-weight: 700; font-size: 20px; line-height: 1.2; color: var(--color-text-primary); white-space: nowrap; }
 .chip.dim .chip-v { color: var(--color-text-muted); }
 .tbl-wrap { flex: 1; min-height: 150px; overflow-y: auto; border: 1px solid var(--color-border); border-radius: var(--radius-md); margin-top: 6px; }
 table.tbl { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 13.5px; }
@@ -165,7 +165,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-family: var(--font-mono
     <div class="cc-scene">
       <div class="cc-scene-head">
         <div class="sentence" id="sentence">
-          <span class="q-word">Longest runs of</span>
+          <span class="q-word">Streaks of</span>
           <button class="q-tok" id="tok-unit"></button>
           <span class="q-word">with</span>
           <button class="q-tok" id="tok-metric" hidden></button>
@@ -1588,7 +1588,6 @@ async function loadHourly(s) {
       h.live = 'ok';
     } catch (e) { h.live = 'fail'; h.liveError = e.message; }
   } else h.live = 'ok';
-  s.liveAt = Date.now();
   if (!alive(s)) return;
   s.cache = {};
   onDataChange(s);
@@ -2026,13 +2025,14 @@ function drawNow(c, x, y, w, h, hits) {
   const showThr = !V.categorical && !(V.trace && cfg.value === 0);
   if (showThr) { lo = Math.min(lo, cfg.value); hi = Math.max(hi, cfg.value); }
   if (lo === Infinity) return emptyMsg(c, x, y, w, h, 'No observations in this window');
-  if (asBars || cfg.variable === 'cloud') lo = Math.min(0, lo);
+  if (asBars) lo = Math.min(0, lo);
   if (V.categorical) { lo = 0; hi = 1; }
-  if (cfg.variable === 'cloud') hi = Math.max(hi, 8);
   const padL = V.categorical ? 18 : 54, padR = showThr ? 74 : 16, padT = 30, padB = 30;
   const x0 = x + padL, x1 = x + w - padR, y0 = y + h - padB, y1 = y + padT;
-  const span = hi - lo || 1, step = V.categorical ? 1 : niceStep(span * 1.1, Math.max(3, (y0 - y1) / 55));
-  const yl = V.categorical ? 0 : Math.floor((lo - span * 0.04) / step) * step, yh = V.categorical ? 1.12 : Math.ceil((hi + span * 0.06) / step) * step;
+  const span = hi - lo || 1, cloud = cfg.variable === 'cloud';
+  const step = V.categorical ? 1 : cloud ? 2 : niceStep(span * 1.1, Math.max(3, (y0 - y1) / 55));
+  const yl = V.categorical ? 0 : cloud ? -0.4 : asBars && lo >= 0 ? 0 : Math.floor((lo - span * 0.04) / step) * step;
+  const yh = V.categorical ? 1.12 : cloud ? 8.6 : Math.ceil((hi + span * 0.06) / step) * step;
   const X = t => x0 + (t - t0) / (t1 - t0) * (x1 - x0), Y = v => y0 - (v - yl) / (yh - yl) * (y0 - y1);
   // focus band
   if (focus) {
@@ -2045,7 +2045,7 @@ function drawNow(c, x, y, w, h, hits) {
   }
   // grid
   c.font = `13px ${F.mono}`; c.textBaseline = 'middle'; c.textAlign = 'right';
-  if (!V.categorical) for (let v = yl; v <= yh + 1e-9; v += step) {
+  if (!V.categorical) for (let v = cloud ? 0 : yl; v <= yh + 1e-9; v += step) {
     const py = Math.round(Y(v)) + .5; c.strokeStyle = C.grid; c.lineWidth = 1; c.beginPath(); c.moveTo(x0, py); c.lineTo(x1, py); c.stroke();
     c.fillStyle = C.muted; c.fillText(step < 1 ? v.toFixed(step < 0.1 ? 2 : 1) : String(Math.round(v)), x0 - 8, py);
   }
@@ -2596,7 +2596,7 @@ new ResizeObserver(() => draw()).observe($('stage'));
 initSearch();
 selectStation(readURL(), true);
 (document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve()).then(() => draw());
-setInterval(() => { if (store && store.hourly.live === 'ok' && document.visibilityState === 'visible' && Date.now() - (store.liveAt || Date.now()) > 20 * 60000) refreshLive(); }, 60000);
+setInterval(() => { if (store && store.hourly.live === 'ok' && document.visibilityState === 'visible' && Date.now() - (store.liveAt || store.loadedAt || Date.now()) > 20 * 60000) refreshLive(); }, 60000);
 async function refreshLive() {
   const s = store, h = s.hourly; s.liveAt = Date.now();
   try {
