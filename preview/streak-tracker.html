@@ -1589,6 +1589,7 @@ async function loadHourly(s) {
     } catch (e) { h.live = 'fail'; h.liveError = e.message; }
   } else h.live = 'ok';
   if (!alive(s)) return;
+  h.any = false; const t = vals.tmpf, w = vals.wind; for (let i = 0; i < t.length; i++) if (t[i] === t[i] || w[i] === w[i]) { h.any = true; break; }
   s.cache = {};
   onDataChange(s);
 }
@@ -1791,7 +1792,8 @@ function renderStationMeta() {
   $('stn-name').textContent = `${st.name}, ${st.st}`;
   const lines = [];
   const nowY = nowLST(st).y;
-  if (h.status === 'ok') lines.push(`Hourly: ${st.id} ${h.archive ? h.firstY : h.through + 1}–${h.live === 'ok' ? nowY : h.through}`);
+  if (h.status === 'ok' && h.archive) lines.push(`Hourly: ${st.id} ${h.firstY}–${h.live === 'ok' ? nowY : h.through}`);
+  else if (h.status === 'ok' && h.live === 'ok' && h.any) lines.push(`Hourly: ${st.id} ${h.through + 1}–${nowY}`);
   if (a.status === 'ok') {
     const y0 = dayToYMD(a.startDay).y;
     lines.push(`Daily: ${store.thread ? `${store.thread.name} ThreadEx` : `${st.id.replace(/^K/, '')} ACIS`} ${y0}–${nowY}` +
@@ -1799,7 +1801,7 @@ function renderStationMeta() {
   }
   $('stn-meta').innerHTML = lines.map(esc).join('<br>') || '&nbsp;';
   const n = $('notice'), msgs = [];
-  if (h.status === 'ok' && !h.archive) msgs.push(`No hourly archive for ${st.id}; recent observations only.`);
+  if (h.status === 'ok' && !h.archive && h.live !== 'loading') msgs.push(h.any ? `No hourly archive for ${st.id}; recent observations only.` : `No hourly observations found for ${st.id}.`);
   if (h.live === 'fail' && cfg && sourceFor(cfg) === 'iem') msgs.push(`Latest observations unavailable (${h.liveError}). History ends ${h.through}.`);
   if (a.status === 'fail' && cfg && sourceFor(cfg) === 'acis') msgs.push(`Daily record unavailable (${a.error}).`);
   n.hidden = !msgs.length;
